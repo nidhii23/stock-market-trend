@@ -1,274 +1,348 @@
+"""
+app.py — Streamlit UI only.
+
+All computation is in pipeline.py.
+This file only renders what pipeline.run_pipeline() returns.
+~120 lines vs the previous ~560 lines.
+"""
+
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import plotly.graph_objects as go
 
-from technical_engine import calculate_technical_score
-from fundamental_engine import calculate_fundamental_score
-from decision_engine import make_decision
-from sentiment import get_news_sentiment
-from fundamentals import get_fundamentals
-from backtesting import run_backtest, calculate_metrics
-from ml_model import prepare_features, train_model, predict_signal
+from pipeline import INITIAL_CASH, run_pipeline
 
-# ==============================
-# PAGE CONFIG
-# ==============================
-st.set_page_config(page_title="Stock Prediction System", layout="wide")
+# ── Page config ───────────────────────────────────────────
+st.set_page_config(
+    page_title="Stock Trend Prediction",
+    page_icon="📈",
+    layout="wide",
+)
 
-st.title("📈 Stock Market Trend Prediction System")
-st.subheader("📊 Multi-Stock AI Scanner")
+st.title("📈 Stock Market Trend Prediction")
+st.caption("LSTM+XGBoost · TFT · GNN · Technical · Fundamental · Sentiment · Regime")
 
-# ==============================
-# INPUT
-# ==============================
-stocks = {
-    "TCS": "TCS.NS",
-    "Reliance": "RELIANCE.NS",
-    "Infosys": "INFY.NS",
-    "HDFC Bank": "HDFCBANK.NS",
-    "ICICI Bank": "ICICIBANK.NS",
-    "L&T": "LT.NS",
-    "ITC": "ITC.NS",
-    "SBI": "SBIN.NS",
-    "Bharti Airtel": "BHARTIARTL.NS",
-    "HCL Tech": "HCLTECH.NS"
+# ── Sidebar settings ──────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Settings")
+    use_tft   = st.toggle("Temporal Fusion Transformer", value=False)
+    use_gnn   = st.toggle("Graph Neural Network",        value=False)
+    use_macro = st.toggle("India VIX + USD/INR",         value=True)
+    st.divider()
+    st.caption("Base: LSTM+XGBoost · Walk-forward CV · ATR stop-loss")
+
+# ── Stock selector ────────────────────────────────────────
+STOCKS = {
+    # Large-caps
+    "TCS":            "TCS.NS",      "Reliance":      "RELIANCE.NS",
+    "Infosys":        "INFY.NS",     "HDFC Bank":     "HDFCBANK.NS",
+    "ICICI Bank":     "ICICIBANK.NS","L&T":           "LT.NS",
+    "ITC":            "ITC.NS",      "SBI":           "SBIN.NS",
+    "Bharti Airtel":  "BHARTIARTL.NS","HCL Tech":     "HCLTECH.NS",
+    # Midcap IT
+    "Persistent Sys": "PERSISTENT.NS","Coforge":      "COFORGE.NS",
+    "KPIT Tech":      "KPITTECH.NS", "Mphasis":       "MPHASIS.NS",
+    # Midcap Banking
+    "Federal Bank":   "FEDERALBNK.NS","IDFC First":   "IDFCFIRSTB.NS",
+    "Bandhan Bank":   "BANDHANBNK.NS","Cholamandalam":"CHOLAFIN.NS",
+    # Midcap FMCG
+    "Tata Consumer":  "TATACONSUM.NS","Godrej Consumer":"GODREJCP.NS",
+    "Marico":         "MARICO.NS",
+    # Midcap Pharma
+    "Alkem Labs":     "ALKEM.NS",    "Ipca Labs":     "IPCALAB.NS",
+    "Torrent Pharma": "TORNTPHARM.NS",
+    # Midcap Auto
+    "Ashok Leyland":  "ASHOKLEY.NS", "Escorts Kubota":"ESCORTS.NS",
+    "Balkrishna Ind": "BALKRISIND.NS",
 }
 
-selected_stock = st.selectbox("Select Stock", list(stocks.keys()))
-ticker = stocks[selected_stock]
-
-# ==============================
-# MAIN LOGIC
-# ==============================
-if ticker:
-
-    # FETCH DATA
-    # 🔥 LONG DATA FOR TRAINING + BACKTEST
- df_train = yf.download(ticker, period="10y", interval="1d", auto_adjust=True)
-
-# 🔥 SHORT DATA FOR CURRENT VIEW
-df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True)
-
-if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-        # ==============================
-# ML MODEL 🔥
-# ==============================
-# 🔥 TRAIN ON LONG DATA
-df_ml_train = prepare_features(df_train)
-model, features, ml_metrics = train_model(df_ml_train)
-
-if model is None:
-    ml_signal = "HOLD"
-else:
-    df_ml = prepare_features(df)
-    ml_signal = predict_signal(model, df_ml, features)
-
-# 🔥 PREDICT ON RECENT DATA
-df_ml = prepare_features(df)
-ml_signal = predict_signal(model, df_ml, features)
-
-    # TECHNICAL
-tech = calculate_technical_score(df)
-
-    # FUNDAMENTALS (REAL)
-fundamental_data = get_fundamentals(ticker)
-fund = calculate_fundamental_score(fundamental_data)
-
-    # SENTIMENT
-sentiment = get_news_sentiment(ticker)
-
-# ==============================
-# BACKTEST SIGNAL GENERATION 🔥
-# ==============================
-
-signals = []
-
-MIN_DATA = 30
-
-for i in range(len(df)):
-
-    temp_df = df.iloc[:i+1]
-
-    # Default signal
-    signal = "HOLD"
-
-    if i >= MIN_DATA:
-
-        tech_i = calculate_technical_score(temp_df)
-        fund_i = fund
-        sent_i = sentiment
-
-        df_ml_i = prepare_features(temp_df)
-
-        if len(df_ml_i) >= 30:
-            ml_i = predict_signal(model, df_ml_i, features)
-
-            decision_i = make_decision(tech_i, fund_i, sent_i, ml_i)
-
-            signal = decision_i["signal"]
-            
-
-    # Prevent duplicate BUY/SELL
-    if len(signals) > 0:
-        if signals[-1] == "BUY" and signal == "BUY":
-            signal = "HOLD"
-        elif signals[-1] == "SELL" and signal == "SELL":
-            signal = "HOLD"
-
-    signals.append(signal)
+selected_name = st.selectbox("Select stock", list(STOCKS.keys()))
+ticker        = STOCKS[selected_name]
 
 
-signals = pd.Series(signals, index=df.index)
-st.write(pd.Series(signals).value_counts())
-# ==============================
-# RUN BACKTEST
-# ==============================
-df_bt, trades = run_backtest(df, signals)
-metrics = calculate_metrics(df_bt)
+# ── Pipeline (cached per ticker + settings) ───────────────
+@st.cache_data(ttl=3600, show_spinner="Running full analysis…")
+def load_all_stocks_for_gnn():
+    dfs = {}
+    for t in STOCKS.values():
+        try:
+            df = yf.download(t, period="2y", interval="1d",
+                             auto_adjust=True, progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            if not df.empty:
+                dfs[t] = df
+        except Exception:
+            pass
+    return dfs
 
-# FINAL DECISION
-final = make_decision(tech, fund, sentiment, ml_signal)
 
-    # ==============================
-    # UI LAYOUT
-    # ==============================
-col1, col2 = st.columns(2)
+with st.spinner(f"Analysing {selected_name}…"):
+    all_dfs = load_all_stocks_for_gnn() if use_gnn else None
+    r = run_pipeline(ticker, use_tft=use_tft, use_gnn=use_gnn,
+                     use_macro=use_macro, all_dfs=all_dfs)
 
-    # PRICE CHART
-with col1:
-        st.subheader("📊 Price Chart")
-       # ==============================
-# PRICE CHART WITH SIGNALS 🔥
-# ==============================
-fig = go.Figure()
+if r.error:
+    st.error(f"Pipeline error: {r.error}")
+    st.stop()
 
-# Price line
-fig.add_trace(go.Scatter(
-    x=df.index,
-    y=df["Close"],
-    mode="lines",
-    name="Price"
-))
 
-# BUY signals
-buy_signals = df_bt[signals == "BUY"]
 
-fig.add_trace(go.Scatter(
-    x=buy_signals.index,
-    y=buy_signals["Close"],
-    mode="markers",
-    marker=dict(symbol="triangle-up", size=10),
-    name="BUY"
-))
+# ── Unpack for convenience ────────────────────────────────
+final   = r.final
+tech    = r.tech
+fund    = r.fund
+regime  = r.regime
+nse     = r.nse
 
-# SELL signals
-sell_signals = df_bt[signals == "SELL"]
+# ══════════════════════════════════════════════════════════
+# UI — purely rendering from here down
+# ══════════════════════════════════════════════════════════
 
-fig.add_trace(go.Scatter(
-    x=sell_signals.index,
-    y=sell_signals["Close"],
-    mode="markers",
-    marker=dict(symbol="triangle-down", size=10),
-    name="SELL"
-))
+# ── Banners ───────────────────────────────────────────────
+reg_color = "🟢" if regime["regime"] == "BULL" else ("🔴" if regime["regime"] == "BEAR" else "⚪")
+st.info(f"{reg_color} **Market regime:** {regime['signal']}")
 
-st.plotly_chart(fig, use_container_width=True)
+if final.get("regime_override"):
+    st.warning(f"⚡ {final['regime_override']}")
+if final.get("earnings_risk") == "HIGH":
+    st.warning(f"⚠️ Earnings within 14 days — BUY blocked to reduce event risk")
 
-    # FINAL SIGNAL
-with col2:
-        st.subheader("🚀 Final Recommendation")
-        st.metric("Signal", final["signal"])
-        st.metric("Confidence", f"{final['confidence']}%")
-        st.metric("Score", final["final_score"])
+sig_color = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(final["signal"], "⚪")
+st.markdown(f"## {sig_color} Final signal: **{final['signal']}**  —  confidence {final['confidence']:.1f}%")
 
-    # ==============================
-    # TECHNICAL
-    # ==============================
-st.subheader("⚙️ Technical Analysis")
+# ── Model signals ─────────────────────────────────────────
+st.subheader("🤖 Model signals")
+mc = st.columns(4)
+mc[0].metric("LSTM+XGB",  r.ml_signal,  f"{r.ml_confidence*100:.1f}%")
+mc[1].metric("Technical", tech["signal"])
+mc[2].metric("TFT",  r.tft_signal, f"{r.tft_confidence*100:.1f}%" if use_tft else "off")
+mc[3].metric("GNN",  r.gnn_signal, f"{r.gnn_confidence*100:.1f}%" if use_gnn else "off")
 
-st.write("**Signal:**", tech["signal"])
-st.write("**Score:**", tech["score"])
+# ── Macro indicators ──────────────────────────────────────
+if use_macro and (tech.get("vix") or tech.get("usdinr")):
+    st.subheader("🌐 Macro indicators")
+    m1, m2, m3 = st.columns(3)
+    if tech.get("vix"):
+        vix = tech["vix"]
+        m1.metric("India VIX", f"{vix:.1f}",
+                  "High fear" if vix > 20 else ("Low fear" if vix < 13 else "Neutral"))
+    if tech.get("usdinr"):
+        usd = tech["usdinr"]
+        m2.metric("USD/INR", f"{usd:.2f}",
+                  "Weak rupee" if usd > 84 else ("Strong rupee" if usd < 82 else "Neutral"))
+    m3.metric("Nifty50", f"₹{regime['last_close']:,.0f}",
+              f"MA50 vs MA200: {regime['gap_pct']:+.1f}%")
 
-st.write("### ✅ Why BUY")
-for r in tech["buy_reasons"]:
-        st.write("✔", r)
+# ── NSE signals ───────────────────────────────────────────
+pcr   = nse.get("pcr")
+e_risk = nse.get("earnings_risk", "UNKNOWN")
+s_sig  = nse.get("sector_signal", "UNKNOWN")
+d_to_e = nse.get("days_to_earnings")
+if any(v is not None for v in [pcr, e_risk, s_sig]):
+    st.subheader("📋 NSE signals")
+    n1, n2, n3 = st.columns(3)
+    if pcr:
+        n1.metric("Nifty PCR", f"{pcr:.2f}", nse.get("pcr_signal", ""))
+    n2.metric("Sector momentum", s_sig,
+              f"5d: {nse.get('sector_5d',0):+.1f}%  21d: {nse.get('sector_21d',0):+.1f}%")
+    n3.metric("Earnings risk", e_risk,
+              f"{d_to_e} days" if d_to_e else "Unknown")
 
-st.write("### ⚠ Risks")
-for r in tech["sell_reasons"]:
-        st.write("⚠", r)
+# ── Price chart + component scores ────────────────────────
+col_chart, col_scores = st.columns([2, 1])
+with col_chart:
+    st.subheader("Price chart + signals")
+    buy_idx  = r.df_bt.index[r.signals == "BUY"]
+    sell_idx = r.df_bt.index[r.signals == "SELL"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=r.df_bt.index, y=r.df_bt["Close"],
+                             mode="lines", name="Close", line=dict(width=1.5)))
+    fig.add_trace(go.Scatter(x=buy_idx, y=r.df_bt.loc[buy_idx, "Close"],
+                             mode="markers", name="BUY",
+                             marker=dict(symbol="triangle-up", size=10, color="lime")))
+    fig.add_trace(go.Scatter(x=sell_idx, y=r.df_bt.loc[sell_idx, "Close"],
+                             mode="markers", name="SELL",
+                             marker=dict(symbol="triangle-down", size=10, color="red")))
+    fig.update_layout(height=360, margin=dict(l=0, r=0, t=0, b=0),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                  x=1, xanchor="right"))
+    st.plotly_chart(fig, width="stretch")
 
-    # ==============================
-    # FUNDAMENTALS
-    # ==============================
-st.subheader("📊 Fundamental Analysis")
+with col_scores:
+    st.subheader("Component scores")
+    cs = final["component_scores"]
+    for label, key in [("Technical","technical"), ("Fundamental","fundamental"),
+                       ("Sentiment","sentiment"), ("ML","ml")]:
+        if cs.get(key) is not None:
+            st.metric(label, f"{cs[key]*100:.1f}%")
+    if cs.get("tft") is not None:
+        st.metric("TFT", f"{cs['tft']*100:.1f}%")
+    if cs.get("gnn") is not None:
+        st.metric("GNN", f"{cs['gnn']*100:.1f}%")
 
-st.write("**Signal:**", fund["signal"])
-st.write("**Score:**", fund["score"])
+# ── Analysis tabs ─────────────────────────────────────────
+tab_tech, tab_fund, tab_sent, tab_ml, tab_tft, tab_gnn, tab_bt = st.tabs([
+    "⚙️ Technical", "📊 Fundamental", "📰 Sentiment",
+    "🤖 LSTM+XGB",  "🔮 TFT",         "🕸️ GNN", "📈 Backtest",
+])
 
-st.write("### ✅ Why BUY")
-for r in fund["buy_reasons"]:
-        st.write("✔", r)
+with tab_tech:
+    st.write(f"**Signal:** {tech['signal']}  |  **Score:** {tech['score']:.2f}")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("##### ✅ Bullish")
+        for x in tech["buy_reasons"]  or ["—"]: st.write("✔", x)
+    with c2:
+        st.markdown("##### ⚠️ Risks")
+        for x in tech["sell_reasons"] or ["—"]: st.write("⚠", x)
 
-st.write("### ⚠ Risks")
-for r in fund["sell_reasons"]:
-        st.write("⚠", r)
+with tab_fund:
+    scored = fund.get("fields_scored", "?")
+    st.write(f"**Signal:** {fund['signal']}  |  **Score:** {fund['score']:.2f}  |  **Fields scored:** {scored}")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("##### ✅ Bullish")
+        for x in fund["buy_reasons"]  or ["—"]: st.write("✔", x)
+    with c2:
+        st.markdown("##### ⚠️ Risks")
+        for x in fund["sell_reasons"] or ["—"]: st.write("⚠", x)
+    with st.expander("Raw fundamental data"):
+        for k, v in r.fundamental_data.items():
+            st.write(f"**{k}:** {round(v,4) if v is not None else 'N/A'}")
 
-    # ==============================
-    # RAW FUNDAMENTALS (NEW)
-    # ==============================
-st.subheader("📌 Raw Fundamentals")
+with tab_sent:
+    sent = r.sentiment
+    st.write(f"**Signal:** {sent['signal']}  |  **Score:** {sent['score']:.4f}  |  **Engine:** {sent.get('engine','?')}")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("##### 🟢 Positive")
+        for x in sent["positive_news"] or ["—"]: st.write("✔", x)
+    with c2:
+        st.markdown("##### 🔴 Negative")
+        for x in sent["negative_news"] or ["—"]: st.write("⚠", x)
 
-for k, v in fundamental_data.items():
-        st.write(f"{k}: {round(v, 2)}")
+with tab_ml:
+    gate_label = "PASSED" if r.ml_confidence >= 0.55 else "BLOCKED (<55%)"
+    st.write(f"**Signal:** {r.ml_signal}  |  **Confidence:** {r.ml_confidence*100:.1f}%  |  **Gate:** {gate_label}")
+    if r.ml_result.is_valid:
+        m = r.ml_result.metrics
+        st.markdown("##### Walk-forward CV")
+        wf = st.columns(4)
+        wf[0].metric("WF Accuracy",  f"{m['wf_accuracy']}%")
+        wf[1].metric("WF Precision", f"{m['wf_precision']}%")
+        wf[2].metric("WF Recall",    f"{m['wf_recall']}%")
+        wf[3].metric("WF F1",        f"{m['wf_f1']}%")
+        st.markdown("##### Holdout test")
+        ho = st.columns(4)
+        ho[0].metric("Accuracy",  f"{m['accuracy']}%")
+        ho[1].metric("Precision", f"{m['precision']}%")
+        ho[2].metric("Recall",    f"{m['recall']}%")
+        ho[3].metric("F1",        f"{m['f1']}%")
+        st.caption(
+            f"Trained {m['n_train']} days · tested {m['n_test']} days · "
+            f"{m['wf_folds']} WF folds · {m.get('n_features',27)} features · "
+            f"pos_weight={m.get('pos_weight','?')} · "
+            f"Strategy return: {m['cumulative_strategy_return']:.2f}%"
+        )
+    else:
+        st.warning("Model not trained (insufficient data).")
 
-    # ==============================
-    # SENTIMENT
-    # ==============================
-st.subheader("📰 News Sentiment")
+with tab_tft:
+    if not use_tft:
+        st.info("Enable TFT in the sidebar.")
+    elif r.tft_result and r.tft_result.is_valid:
+        st.write(f"**Signal:** {r.tft_signal}  |  **Confidence:** {r.tft_confidence*100:.1f}%")
+        m = r.tft_result.metrics
+        cols = st.columns(2)
+        cols[0].metric("Accuracy", f"{m['accuracy']}%")
+        cols[1].metric("MAE",      f"{m['mae']:.6f}")
+        if r.tft_result.feature_importance is not None:
+            st.markdown("##### Feature importance")
+            st.dataframe(r.tft_result.feature_importance, width="stretch")
+    else:
+        st.warning("TFT failed. Check pytorch-forecasting is installed.")
 
-st.write("**Signal:**", sentiment["signal"])
-st.write("**Score:**", sentiment["score"])
+with tab_gnn:
+    if not use_gnn:
+        st.info("Enable GNN in the sidebar.")
+    elif r.gnn_result and r.gnn_result.is_valid:
+        st.write(f"**Signal:** {r.gnn_signal}  |  **Confidence:** {r.gnn_confidence*100:.1f}%")
+        m = r.gnn_result.metrics
+        cols = st.columns(3)
+        cols[0].metric("Accuracy", f"{m['accuracy']}%")
+        cols[1].metric("Stocks",   m['n_stocks'])
+        cols[2].metric("Edges",    m['n_edges'])
+        if r.gnn_result.edge_df is not None and not r.gnn_result.edge_df.empty:
+            st.markdown("##### Correlation graph")
+            st.dataframe(
+                r.gnn_result.edge_df.sort_values("correlation", key=abs, ascending=False),
+                width="stretch",
+            )
+    else:
+        st.warning("GNN failed. Check torch-geometric is installed.")
 
-st.write("### 🟢 Positive News")
-for n in sentiment["positive_news"]:
-        st.write("✔", n)
+with tab_bt:
+    no_trades = r.trades.empty or (
+        not r.trades.empty and
+        r.trades["action"].str.contains("OPEN").all()
+    )
+    if no_trades:
+        bull_days = int(r.hist_regime.sum()) if not r.hist_regime.empty else 0
+        bear_days = len(r.df_short) - bull_days
+        st.info(
+            f"💰 **No trades executed** — signals blocked by confidence gate (55%) "
+            f"and/or regime filter.  \n"
+            f"📊 {bull_days} BULL days vs {bear_days} BEAR days over backtest period."
+        )
 
-st.write("### 🔴 Negative News")
-for n in sentiment["negative_news"]:
-        st.write("⚠", n)
+    st.markdown("### Strategy vs Nifty50")
+    if no_trades:
+        bm_ret = r.benchmark.get("total_return_pct", 0)
+        verdict_color = "🟢" if 0 > bm_ret else "🔴"
+        st.write(f"{verdict_color} Strategy preserved capital (0%) vs Nifty50 {bm_ret:+.2f}%")
+        cols = st.columns(2)
+        cols[0].metric("Strategy (no trades)", "0.00%", "Capital preserved")
+        cols[1].metric("Nifty50 buy-and-hold", f"{bm_ret:.2f}%")
+    else:
+        comp = r.comparison
+        verdict_color = "🟢" if comp["verdict"] == "OUTPERFORMING" else (
+                        "🔴" if comp["verdict"] == "UNDERPERFORMING" else "🟡")
+        st.write(f"{verdict_color} **{comp['verdict']}** the benchmark")
+        cols = st.columns(4)
+        cols[0].metric("Strategy return", f"{comp['strategy_return']}%",
+                       f"{comp['return_alpha']:+.2f}% vs Nifty50")
+        cols[1].metric("Nifty50 return",  f"{comp['benchmark_return']}%")
+        cols[2].metric("Strategy Sharpe", f"{comp['strategy_sharpe']}",
+                       f"{comp['sharpe_difference']:+.2f} vs Nifty50")
+        cols[3].metric("Nifty50 Sharpe",  f"{comp['benchmark_sharpe']}")
+        st.markdown("### Performance metrics")
+        mc2 = st.columns(len(r.metrics))
+        for col, (k, v) in zip(mc2, r.metrics.items()):
+            col.metric(k, v)
 
-    # ==============================
-    # FINAL EXPLANATION
-    # ==============================
-st.subheader("🧠 Final Explanation")
+    st.markdown("### Portfolio equity curve vs Nifty50")
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=r.df_bt.index, y=r.df_bt["Portfolio"],
+                              mode="lines", fill="tozeroy", name="Strategy",
+                              line=dict(color="#378ADD")))
+    if not r.benchmark.get("series", pd.Series()).empty:
+        bm_s = r.benchmark["series"].reindex(r.df_bt.index, method="ffill")
+        if float(bm_s.iloc[0]) != 0:
+            bm_s = bm_s * (INITIAL_CASH / float(bm_s.iloc[0]))
+        fig2.add_trace(go.Scatter(x=bm_s.index, y=bm_s,
+                                  mode="lines", name="Nifty50",
+                                  line=dict(color="#888780", dash="dash")))
+    fig2.update_layout(height=300, margin=dict(l=0, r=0, t=0, b=0),
+                       legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                   x=1, xanchor="right"))
+    st.plotly_chart(fig2, width="stretch")
 
-st.write("### ✅ Why BUY")
-for r in final["summary"]:
-        st.write("✔", r)
-
-st.write("### ⚠ Risks")
-for r in final["risks"]:
-        st.write("⚠", r)
-        # ==============================
-# BACKTEST RESULTS UI
-# ==============================
-st.subheader("📈 Backtesting Results")
-
-st.write("### Performance Metrics")
-st.write(metrics)
-
-st.line_chart(df_bt["Portfolio"])
-
-st.write("### Trades")
-st.write(trades)
-# ==============================
-# AI PREDICTION 🔥
-# ==============================
-st.subheader("🤖 AI Prediction")
-
-st.write("ML Signal:", ml_signal)
-st.write("### 📊 ML Performance")
-st.write("Accuracy:", f"{ml_metrics['accuracy']}%")
-st.write("Precision:", f"{ml_metrics['precision']}%")
+    st.markdown("### Trade log")
+    if r.trades.empty:
+        st.info("No trades executed.")
+    else:
+        st.dataframe(r.trades, width="stretch")
+        sig_counts = r.signals.value_counts()
+        st.caption("  ·  ".join(f"{k}: {v}" for k, v in sig_counts.items()))
